@@ -21,24 +21,15 @@ resource "azurerm_resource_group" "rg" {
   tags     = var.tags
 }
 
-## Create a Log Analytics Workspace that all resources specific to this workload will
-## write configured resource logs and metrics to
-resource "azurerm_log_analytics_workspace" "log_analytics_workspace" {
-  name                = "law${random_string.unique.result}"
-  location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
-  sku                 = "PerGB2018"
-  retention_in_days   = 30
-  tags                = var.tags
-}
-
 ## Create a virtual network for the AI Foundry resource and supporting resources
 ##
 resource "azurerm_virtual_network" "vnet" {
   name                = "vnet-agents${random_string.unique.result}"
   location            = var.location
   resource_group_name = azurerm_resource_group.rg.name
-  address_space       = ["192.168.0.0/16"]
+  address_space       = [
+    var.virtual_network_address_space
+  ]
   tags                = var.tags
 }
 
@@ -48,7 +39,9 @@ resource "azurerm_subnet" "subnet_agent" {
   name                 = "agent-subnet"
   resource_group_name  = azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
-  address_prefixes     = ["192.168.0.0/24"]
+  address_prefixes     = [
+    var.agent_subnet_address_prefix
+  ]
   delegation {
     name = "Microsoft.App/environments"
     service_delegation {
@@ -61,7 +54,9 @@ resource "azurerm_subnet" "subnet_pe" {
   name                 = "pe-subnet"
   resource_group_name  = azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
-  address_prefixes     = ["192.168.1.0/24"]
+  address_prefixes     = [
+    var.private_endpoint_subnet_address_prefix
+  ]
 }
 
 ########## Create resoures required to store agent data in custoer subscription
@@ -90,57 +85,6 @@ resource "azurerm_storage_account" "storage_account" {
     bypass = [
       "AzureServices"
     ]
-  }
-}
-
-# Configure diagnostic settings for storage account
-resource "azurerm_monitor_diagnostic_setting" "diag-storage-account" {
-
-  depends_on = [azurerm_storage_account.storage_account]
-
-  name                       = "diag-base"
-  target_resource_id         = azurerm_storage_account.storage_account.id
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.log_analytics_workspace.id
-
-  metric {
-    category = "Transaction"
-  }
-
-  metric {
-    category = "Capacity"
-  }
-}
-
-# Create diagnostic settings for blob services endpoint of storage account
-resource "azurerm_monitor_diagnostic_setting" "diag-storage-blob" {
-
-  depends_on = [
-    azurerm_storage_account.storage_account,
-    azurerm_monitor_diagnostic_setting.diag-storage-account
-  ]
-
-  name                       = "diag-blob"
-  target_resource_id         = "${azurerm_storage_account.storage_account.id}/blobServices/default"
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.log_analytics_workspace.id
-
-  enabled_log {
-    category = "StorageRead"
-  }
-
-  enabled_log {
-    category = "StorageWrite"
-  }
-
-  enabled_log {
-    category = "StorageDelete"
-  }
-
-  metric {
-    category = "Transaction"
-  }
-
-  metric {
-    category = "Capacity"
   }
 }
 
@@ -174,24 +118,6 @@ resource "azurerm_cosmosdb_account" "cosmosdb" {
     location          = var.location
     failover_priority = 0
     zone_redundant    = false
-  }
-}
-
-# Create diagnostic settings for the Cosmos DB account
-resource "azurerm_monitor_diagnostic_setting" "diag-cosmos" {
-  depends_on = [
-    azurerm_cosmosdb_account.cosmosdb
-  ]
-
-  name                       = "diag-base"
-  target_resource_id         = azurerm_cosmosdb_account.cosmosdb.id
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.log_analytics_workspace.id
-
-  enabled_log {
-    category = "DataPlaneRequests"
-  }
-  enabled_log {
-    category = "ControlPlaneRequests"
   }
 }
 
@@ -238,24 +164,6 @@ resource "azapi_resource" "ai_search" {
   }
 }
 
-# Create diagnostic settings for the Azure AI Search service
-resource "azurerm_monitor_diagnostic_setting" "diag-search" {
-  depends_on = [
-    azapi_resource.ai_search
-  ]
-
-  name                       = "diag-base"
-  target_resource_id         = azapi_resource.ai_search.id
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.log_analytics_workspace.id
-
-  enabled_log {
-    category = "OperationLogs"
-  }
-  metric {
-    category = "AllMetrics"
-  }
-}
-
 ########## Create AI Foundry resource
 ##########
 
@@ -263,7 +171,7 @@ resource "azurerm_monitor_diagnostic_setting" "diag-search" {
 ##
 resource "azapi_resource" "ai_foundry" {
   depends_on = [
-    azurerm_virtual_network.vnet
+    azurerm_subnet.subnet_agent
   ]
 
   type                      = "Microsoft.CognitiveServices/accounts@2025-04-01-preview"
@@ -305,60 +213,6 @@ resource "azapi_resource" "ai_foundry" {
   }
 }
 
-# Create a deployment for OpenAI's GPT-4o in the AI Foundry resource
-#
-resource "azurerm_cognitive_deployment" "aifoundry_deployment_gpt_4o" {
-  depends_on = [
-    azapi_resource.ai_foundry
-  ]
-
-  name                 = "gpt-4o"
-  cognitive_account_id = azapi_resource.ai_foundry.id
-
-  sku {
-    name     = "GlobalStandard"
-    capacity = 1
-  }
-
-  model {
-    format  = "OpenAI"
-    name    = "gpt-4o"
-    version = "2024-05-13"
-  }
-}
-
-# Create diagnostic settings for the AI Foundry resource
-#
-resource "azurerm_monitor_diagnostic_setting" "diag-aifoundry" {
-  depends_on = [
-    azapi_resource.ai_foundry
-  ]
-
-  name                       = "diag"
-  target_resource_id         = azapi_resource.ai_foundry.id
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.log_analytics_workspace.id
-
-  enabled_log {
-    category = "Audit"
-  }
-
-  enabled_log {
-    category = "AzureOpenAIRequestUsage"
-  }
-
-  enabled_log {
-    category = "RequestResponse"
-  }
-
-  enabled_log {
-    category = "Trace"
-  }
-
-  metric {
-    category = "AllMetrics"
-  }
-}
-
 ## Pause until capability host for the account is created
 ##
 resource "null_resource" "wait_capability_host" {
@@ -390,6 +244,28 @@ resource "null_resource" "wait_capability_host" {
       sleep 30
     done
     EOF
+  }
+}
+
+## Create a deployment for OpenAI's GPT-4o in the AI Foundry resource
+##
+resource "azurerm_cognitive_deployment" "aifoundry_deployment_gpt_4o" {
+  depends_on = [
+    azapi_resource.ai_foundry
+  ]
+
+  name                 = "gpt-4o"
+  cognitive_account_id = azapi_resource.ai_foundry.id
+
+  sku {
+    name     = "GlobalStandard"
+    capacity = 1
+  }
+
+  model {
+    format  = "OpenAI"
+    name    = "gpt-4o"
+    version = "2024-05-13"
   }
 }
 
@@ -518,6 +394,12 @@ resource "azurerm_private_dns_zone_virtual_network_link" "plz_openai_link" {
 ##
 resource "azurerm_private_endpoint" "pe-storage" {
   depends_on = [
+    azurerm_private_dns_zone_virtual_network_link.plz_ai_search_link,
+    azurerm_private_dns_zone_virtual_network_link.plz_storage_blob_link,
+    azurerm_private_dns_zone_virtual_network_link.plz_cognitive_services_link,
+    azurerm_private_dns_zone_virtual_network_link.plz_ai_services_link,
+    azurerm_private_dns_zone_virtual_network_link.plz_openai_link,
+    azurerm_private_dns_zone_virtual_network_link.plz_cosmos_db_link,
     azurerm_storage_account.storage_account,
     azurerm_virtual_network.vnet
   ]
@@ -548,6 +430,7 @@ resource "azurerm_private_endpoint" "pe-storage" {
 
 resource "azurerm_private_endpoint" "pe-cosmosdb" {
   depends_on = [
+    azurerm_private_endpoint.pe-storage,
     azurerm_cosmosdb_account.cosmosdb,
     azurerm_virtual_network.vnet
   ]
@@ -578,6 +461,7 @@ resource "azurerm_private_endpoint" "pe-cosmosdb" {
 
 resource "azurerm_private_endpoint" "pe-aisearch" {
   depends_on = [
+    azurerm_private_endpoint.pe-cosmosdb,
     azapi_resource.ai_search,
     azurerm_virtual_network.vnet
   ]
@@ -608,6 +492,7 @@ resource "azurerm_private_endpoint" "pe-aisearch" {
 
 resource "azurerm_private_endpoint" "pe-aifoundry" {
   depends_on = [
+    azurerm_private_endpoint.pe-aisearch,
     azapi_resource.ai_foundry,
     azurerm_virtual_network.vnet
   ]
@@ -834,6 +719,7 @@ resource "time_sleep" "wait_rbac" {
 ##
 resource "azapi_resource" "ai_foundry_project_capability_host" {
   depends_on = [
+    null_resource.wait_capability_host,
     time_sleep.wait_rbac
   ]
   type                      = "Microsoft.CognitiveServices/accounts/projects/capabilityHosts@2025-04-01-preview"
