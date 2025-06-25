@@ -213,40 +213,6 @@ resource "azapi_resource" "ai_foundry" {
   }
 }
 
-## Pause until capability host for the account is created
-##
-resource "null_resource" "wait_capability_host" {
-  depends_on = [
-    azapi_resource.ai_foundry
-  ]
-  triggers = {
-    always_run = timestamp()
-  }
-  provisioner "local-exec" {
-    command = <<EOF
-    while true; do 
-      result=$(az rest --method get --uri "https://management.azure.com/subscriptions/${data.azurerm_subscription.current.subscription_id}/resourceGroups/${azurerm_resource_group.rg.name}/providers/Microsoft.CognitiveServices/accounts/${azapi_resource.ai_foundry.name}/capabilityHosts/?api-version=2025-04-01-preview")
-      exit_code=$?
-      if [ $exit_code -ne 0 ]; then
-        exit 1
-      fi
-
-      provisioning_state=$(echo "$result" | jq -r '.value[0].properties.provisioningState')
-
-      if [ "$provisioning_state" == "Succeeded" ]; then
-        echo "Capability host is ready."
-        exit 0
-      elif [ "$provisioning_state" == "Failed" ]; then
-        echo "Capability host creation failed."
-        exit 1
-      fi                 
-
-      sleep 30
-    done
-    EOF
-  }
-}
-
 ## Create a deployment for OpenAI's GPT-4o in the AI Foundry resource
 ##
 resource "azurerm_cognitive_deployment" "aifoundry_deployment_gpt_4o" {
@@ -719,7 +685,6 @@ resource "time_sleep" "wait_rbac" {
 ##
 resource "azapi_resource" "ai_foundry_project_capability_host" {
   depends_on = [
-    null_resource.wait_capability_host,
     time_sleep.wait_rbac
   ]
   type                      = "Microsoft.CognitiveServices/accounts/projects/capabilityHosts@2025-04-01-preview"
