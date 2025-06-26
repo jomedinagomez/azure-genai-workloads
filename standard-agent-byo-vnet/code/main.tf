@@ -12,59 +12,16 @@ resource "random_string" "unique" {
   upper       = false
 }
 
-## Create a resource group for the resources to be stored in.
-## As of 6/4/2025, the AI Foundry resource and project must be placed in the same resource group as the
-## virtual network that will be used for Standard Agent Vnet injection.
-resource "azurerm_resource_group" "rg" {
-  name     = "rg-aifoundry${random_string.unique.result}"
-  location = var.location
-}
-
-## Create a virtual network for the AI Foundry resource and supporting resources
-##
-resource "azurerm_virtual_network" "vnet" {
-  name                = "vnet-agents${random_string.unique.result}"
-  location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
-  address_space       = [
-    var.virtual_network_address_space
-  ]
-}
-
-## Create two subnets one for the Standard Agent VNet injection and one for the AI Foundry resource
-##
-resource "azurerm_subnet" "subnet_agent" {
-  name                 = "agent-subnet"
-  resource_group_name  = azurerm_resource_group.rg.name
-  virtual_network_name = azurerm_virtual_network.vnet.name
-  address_prefixes     = [
-    var.agent_subnet_address_prefix
-  ]
-  delegation {
-    name = "Microsoft.App/environments"
-    service_delegation {
-      name = "Microsoft.App/environments"
-    }
-  }
-}
-
-resource "azurerm_subnet" "subnet_pe" {
-  name                 = "pe-subnet"
-  resource_group_name  = azurerm_resource_group.rg.name
-  virtual_network_name = azurerm_virtual_network.vnet.name
-  address_prefixes     = [
-    var.private_endpoint_subnet_address_prefix
-  ]
-}
-
-########## Create resoures required to store agent data
+########## Create resoures required to for agent data storage
 ##########
 
 ## Create a storage account for agent data
 ##
 resource "azurerm_storage_account" "storage_account" {
+  provider = azurerm.workload_subscription
+
   name                = "aifoundry${random_string.unique.result}storage"
-  resource_group_name = azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name_resources
   location            = var.location
 
   account_kind             = "StorageV2"
@@ -88,9 +45,11 @@ resource "azurerm_storage_account" "storage_account" {
 ## Create the Cosmos DB account to store agent threads
 ##
 resource "azurerm_cosmosdb_account" "cosmosdb" {
+  provider = azurerm.workload_subscription
+
   name                = "aifoundry${random_string.unique.result}cosmosdb"
   location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name_resources
 
   # General settings
   offer_type        = "Standard"
@@ -121,9 +80,11 @@ resource "azurerm_cosmosdb_account" "cosmosdb" {
 ## Create an AI Search instance that will be used to store vector embeddings
 ##
 resource "azapi_resource" "ai_search" {
+  provider = azapi.workload_subscription
+
   type                      = "Microsoft.Search/searchServices@2024-06-01-preview"
   name                      = "aifoundry${random_string.unique.result}search"
-  parent_id                 = azurerm_resource_group.rg.id
+  parent_id                 = "/subscriptions/${var.subscription_id_resources}/resourceGroups/${var.resource_group_name_resources}"
   location                  = var.location
   schema_validation_enabled = true
 
@@ -166,13 +127,11 @@ resource "azapi_resource" "ai_search" {
 ## Create the AI Foundry resource
 ##
 resource "azapi_resource" "ai_foundry" {
-  depends_on = [
-    azurerm_subnet.subnet_agent
-  ]
+  provider = azapi.workload_subscription
 
   type                      = "Microsoft.CognitiveServices/accounts@2025-04-01-preview"
   name                      = "aifoundry${random_string.unique.result}"
-  parent_id                 = azurerm_resource_group.rg.id
+  parent_id                 = "/subscriptions/${var.subscription_id_resources}/resourceGroups/${var.resource_group_name_resources}"
   location                  = var.location
   schema_validation_enabled = false
 
@@ -200,7 +159,7 @@ resource "azapi_resource" "ai_foundry" {
       networkInjections = [
         {
           scenario                   = "agent"
-          subnetArmId                = azurerm_subnet.subnet_agent.id
+          subnetArmId                = var.subnet_id_agent
           useMicrosoftManagedNetwork = false
         }
       ]
@@ -211,6 +170,8 @@ resource "azapi_resource" "ai_foundry" {
 ## Create a deployment for OpenAI's GPT-4o in the AI Foundry resource
 ##
 resource "azurerm_cognitive_deployment" "aifoundry_deployment_gpt_4o" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     azapi_resource.ai_foundry
   ]
@@ -233,137 +194,19 @@ resource "azurerm_cognitive_deployment" "aifoundry_deployment_gpt_4o" {
 ########## Create Private DNS Zones, Links, and Private Endpoints
 ##########
 
-## Create required Private DNS Zones
-##
-resource "azurerm_private_dns_zone" "plz_cosmos_db" {
-  name                = "privatelink.documents.azure.com"
-  resource_group_name = azurerm_resource_group.rg.name
-}
-
-resource "azurerm_private_dns_zone" "plz_ai_search" {
-  name                = "privatelink.search.windows.net"
-  resource_group_name = azurerm_resource_group.rg.name
-}
-
-resource "azurerm_private_dns_zone" "plz_storage_blob" {
-  name                = "privatelink.blob.core.windows.net"
-  resource_group_name = azurerm_resource_group.rg.name
-}
-
-resource "azurerm_private_dns_zone" "plz_cognitive_services" {
-  name                = "privatelink.cognitiveservices.azure.com"
-  resource_group_name = azurerm_resource_group.rg.name
-}
-
-resource "azurerm_private_dns_zone" "plz_ai_services" {
-  name                = "privatelink.services.ai.azure.com"
-  resource_group_name = azurerm_resource_group.rg.name
-}
-
-resource "azurerm_private_dns_zone" "plz_openai" {
-  name                = "privatelink.openai.azure.com"
-  resource_group_name = azurerm_resource_group.rg.name
-}
-
-## Create Private DNS Zone Links to link the Private DNS Zones to the virtual network
-##
-resource "azurerm_private_dns_zone_virtual_network_link" "plz_cosmos_db_link" {
-  depends_on = [
-    azurerm_private_dns_zone.plz_cosmos_db,
-    azurerm_virtual_network.vnet
-  ]
-  name                  = "cosmosdb-${random_string.unique.result}-link"
-  resource_group_name   = azurerm_resource_group.rg.name
-  private_dns_zone_name = azurerm_private_dns_zone.plz_cosmos_db.name
-  virtual_network_id    = azurerm_virtual_network.vnet.id
-  registration_enabled  = false
-}
-
-resource "azurerm_private_dns_zone_virtual_network_link" "plz_ai_search_link" {
-  depends_on = [
-    azurerm_private_dns_zone_virtual_network_link.plz_cosmos_db_link,
-    azurerm_private_dns_zone.plz_ai_search,
-    azurerm_virtual_network.vnet
-  ]
-
-  name                  = "aisearch-${random_string.unique.result}-link"
-  resource_group_name   = azurerm_resource_group.rg.name
-  private_dns_zone_name = azurerm_private_dns_zone.plz_ai_search.name
-  virtual_network_id    = azurerm_virtual_network.vnet.id
-  registration_enabled  = false
-}
-
-resource "azurerm_private_dns_zone_virtual_network_link" "plz_storage_blob_link" {
-  depends_on = [
-    azurerm_private_dns_zone_virtual_network_link.plz_ai_search_link,
-    azurerm_private_dns_zone.plz_storage_blob,
-    azurerm_virtual_network.vnet
-  ]
-  name                  = "storage-${random_string.unique.result}-link"
-  resource_group_name   = azurerm_resource_group.rg.name
-  private_dns_zone_name = azurerm_private_dns_zone.plz_storage_blob.name
-  virtual_network_id    = azurerm_virtual_network.vnet.id
-  registration_enabled  = false
-}
-
-resource "azurerm_private_dns_zone_virtual_network_link" "plz_cognitive_services_link" {
-  depends_on = [
-    azurerm_private_dns_zone_virtual_network_link.plz_storage_blob_link,
-    azurerm_private_dns_zone.plz_cognitive_services,
-    azurerm_virtual_network.vnet
-  ]
-  name                  = "cogsvc-${random_string.unique.result}-link"
-  resource_group_name   = azurerm_resource_group.rg.name
-  private_dns_zone_name = azurerm_private_dns_zone.plz_cognitive_services.name
-  virtual_network_id    = azurerm_virtual_network.vnet.id
-  registration_enabled  = false
-}
-
-resource "azurerm_private_dns_zone_virtual_network_link" "plz_ai_services_link" {
-  depends_on = [
-    azurerm_private_dns_zone_virtual_network_link.plz_cognitive_services_link,
-    azurerm_private_dns_zone.plz_ai_services,
-    azurerm_virtual_network.vnet
-  ]
-  name                  = "aiservices-${random_string.unique.result}-link"
-  resource_group_name   = azurerm_resource_group.rg.name
-  private_dns_zone_name = azurerm_private_dns_zone.plz_ai_services.name
-  virtual_network_id    = azurerm_virtual_network.vnet.id
-  registration_enabled  = false
-}
-
-resource "azurerm_private_dns_zone_virtual_network_link" "plz_openai_link" {
-  depends_on = [
-    azurerm_private_dns_zone_virtual_network_link.plz_ai_services_link,
-    azurerm_private_dns_zone.plz_openai,
-    azurerm_virtual_network.vnet
-  ]
-  name                  = "openai-${random_string.unique.result}-link"
-  resource_group_name   = azurerm_resource_group.rg.name
-  private_dns_zone_name = azurerm_private_dns_zone.plz_openai.name
-  virtual_network_id    = azurerm_virtual_network.vnet.id
-  registration_enabled  = false
-}
-
 ## Create Private Endpoints for resources
 ##
 resource "azurerm_private_endpoint" "pe-storage" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
-    azurerm_private_dns_zone_virtual_network_link.plz_ai_search_link,
-    azurerm_private_dns_zone_virtual_network_link.plz_storage_blob_link,
-    azurerm_private_dns_zone_virtual_network_link.plz_cognitive_services_link,
-    azurerm_private_dns_zone_virtual_network_link.plz_ai_services_link,
-    azurerm_private_dns_zone_virtual_network_link.plz_openai_link,
-    azurerm_private_dns_zone_virtual_network_link.plz_cosmos_db_link,
-    azurerm_storage_account.storage_account,
-    azurerm_virtual_network.vnet
+    azurerm_storage_account.storage_account
   ]
 
   name                = "${azurerm_storage_account.storage_account.name}-private-endpoint"
   location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
-  subnet_id           = azurerm_subnet.subnet_pe.id
-
+  resource_group_name = var.resource_group_name_resources
+  subnet_id           = var.subnet_id_private_endpoint
   private_service_connection {
     name                           = "${azurerm_storage_account.storage_account.name}-private-link-service-connection"
     private_connection_resource_id = azurerm_storage_account.storage_account.id
@@ -376,22 +219,23 @@ resource "azurerm_private_endpoint" "pe-storage" {
   private_dns_zone_group {
     name = "${azurerm_storage_account.storage_account.name}-dns-config"
     private_dns_zone_ids = [
-      azurerm_private_dns_zone.plz_storage_blob.id
+      "/subscriptions/${var.subscription_id_infra}/resourceGroups/${var.resource_group_name_dns}/providers/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"
     ]
   }
 }
 
 resource "azurerm_private_endpoint" "pe-cosmosdb" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     azurerm_private_endpoint.pe-storage,
-    azurerm_cosmosdb_account.cosmosdb,
-    azurerm_virtual_network.vnet
+    azurerm_cosmosdb_account.cosmosdb
   ]
 
   name                = "${azurerm_cosmosdb_account.cosmosdb.name}-private-endpoint"
   location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
-  subnet_id           = azurerm_subnet.subnet_pe.id
+  resource_group_name = var.resource_group_name_resources
+  subnet_id           = var.subnet_id_private_endpoint
 
   private_service_connection {
     name                           = "${azurerm_cosmosdb_account.cosmosdb.name}-private-link-service-connection"
@@ -405,22 +249,23 @@ resource "azurerm_private_endpoint" "pe-cosmosdb" {
   private_dns_zone_group {
     name = "${azurerm_cosmosdb_account.cosmosdb.name}-dns-config"
     private_dns_zone_ids = [
-      azurerm_private_dns_zone.plz_cosmos_db.id
+      "/subscriptions/${var.subscription_id_infra}/resourceGroups/${var.resource_group_name_dns}/providers/Microsoft.Network/privateDnsZones/privatelink.documents.azure.com"
     ]
   }
 }
 
 resource "azurerm_private_endpoint" "pe-aisearch" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     azurerm_private_endpoint.pe-cosmosdb,
-    azapi_resource.ai_search,
-    azurerm_virtual_network.vnet
+    azapi_resource.ai_search
   ]
 
   name                = "${azapi_resource.ai_search.name}-private-endpoint"
   location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
-  subnet_id           = azurerm_subnet.subnet_pe.id
+  resource_group_name = var.resource_group_name_resources
+  subnet_id           = var.subnet_id_private_endpoint
 
   private_service_connection {
     name                           = "${azapi_resource.ai_search.name}-private-link-service-connection"
@@ -434,22 +279,23 @@ resource "azurerm_private_endpoint" "pe-aisearch" {
   private_dns_zone_group {
     name = "${azapi_resource.ai_search.name}-dns-config"
     private_dns_zone_ids = [
-      azurerm_private_dns_zone.plz_ai_search.id
+      "/subscriptions/${var.subscription_id_infra}/resourceGroups/${var.resource_group_name_dns}/providers/Microsoft.Network/privateDnsZones/privatelink.search.windows.net"
     ]
   }
 }
 
 resource "azurerm_private_endpoint" "pe-aifoundry" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     azurerm_private_endpoint.pe-aisearch,
-    azapi_resource.ai_foundry,
-    azurerm_virtual_network.vnet
+    azapi_resource.ai_foundry
   ]
 
   name                = "${azapi_resource.ai_foundry.name}-private-endpoint"
   location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
-  subnet_id           = azurerm_subnet.subnet_pe.id
+  resource_group_name = var.resource_group_name_resources
+  subnet_id           = var.subnet_id_private_endpoint
 
   private_service_connection {
     name                           = "${azapi_resource.ai_foundry.name}-private-link-service-connection"
@@ -463,9 +309,9 @@ resource "azurerm_private_endpoint" "pe-aifoundry" {
   private_dns_zone_group {
     name = "${azapi_resource.ai_foundry.name}-dns-config"
     private_dns_zone_ids = [
-      azurerm_private_dns_zone.plz_cognitive_services.id,
-      azurerm_private_dns_zone.plz_ai_services.id,
-      azurerm_private_dns_zone.plz_openai.id
+      "/subscriptions/${var.subscription_id_infra}/resourceGroups/${var.resource_group_name_dns}/providers/Microsoft.Network/privateDnsZones/privatelink.cognitiveservices.azure.com",
+      "/subscriptions/${var.subscription_id_infra}/resourceGroups/${var.resource_group_name_dns}/providers/Microsoft.Network/privateDnsZones/privatelink.services.ai.azure.com",
+      "/subscriptions/${var.subscription_id_infra}/resourceGroups/${var.resource_group_name_dns}/providers/Microsoft.Network/privateDnsZones/privatelink.openai.azure.com"
     ]
   }
 }
@@ -476,6 +322,8 @@ resource "azurerm_private_endpoint" "pe-aifoundry" {
 ## Create AI Foundry project
 ##
 resource "azapi_resource" "ai_foundry_project" {
+  provider = azapi.workload_subscription
+
   depends_on = [
     azapi_resource.ai_foundry,
     azurerm_private_endpoint.pe-storage,
@@ -522,6 +370,8 @@ resource "time_sleep" "wait_project_identities" {
 ## Create AI Foundry project connections
 ##
 resource "azapi_resource" "conn_cosmosdb" {
+  provider = azapi.workload_subscription
+
   type                      = "Microsoft.CognitiveServices/accounts/projects/connections@2025-04-01-preview"
   name                      = azurerm_cosmosdb_account.cosmosdb.name
   parent_id                 = azapi_resource.ai_foundry_project.id
@@ -549,6 +399,8 @@ resource "azapi_resource" "conn_cosmosdb" {
 ## Create the AI Foundry project connection to Azure Storage Account
 ##
 resource "azapi_resource" "conn_storage" {
+  provider = azapi.workload_subscription
+
   type                      = "Microsoft.CognitiveServices/accounts/projects/connections@2025-04-01-preview"
   name                      = azurerm_storage_account.storage_account.name
   parent_id                 = azapi_resource.ai_foundry_project.id
@@ -580,6 +432,8 @@ resource "azapi_resource" "conn_storage" {
 ## Create the AI Foundry project connection to AI Search
 ##
 resource "azapi_resource" "conn_aisearch" {
+  provider = azapi.workload_subscription
+
   type                      = "Microsoft.CognitiveServices/accounts/projects/connections@2025-04-01-preview"
   name                      = azapi_resource.ai_search.name
   parent_id                 = azapi_resource.ai_foundry_project.id
@@ -612,16 +466,20 @@ resource "azapi_resource" "conn_aisearch" {
 ## Create the necessary role assignments for the AI Foundry project over the resources used to store agent data
 ##
 resource "azurerm_role_assignment" "cosmosdb_operator_ai_foundry_project" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     resource.time_sleep.wait_project_identities
   ]
-  name                 = uuidv5("dns", "${azapi_resource.ai_foundry_project.name}${azapi_resource.ai_foundry_project.output.identity.principalId}${azurerm_resource_group.rg.name}cosmosdboperator")
+  name                 = uuidv5("dns", "${azapi_resource.ai_foundry_project.name}${azapi_resource.ai_foundry_project.output.identity.principalId}${var.resource_group_name_resources}cosmosdboperator")
   scope                = azurerm_cosmosdb_account.cosmosdb.id
   role_definition_name = "Cosmos DB Operator"
   principal_id         = azapi_resource.ai_foundry_project.output.identity.principalId
 }
 
 resource "azurerm_role_assignment" "storage_blob_data_contributor_ai_foundry_project" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     resource.time_sleep.wait_project_identities
   ]
@@ -632,6 +490,8 @@ resource "azurerm_role_assignment" "storage_blob_data_contributor_ai_foundry_pro
 }
 
 resource "azurerm_role_assignment" "search_index_data_contributor_ai_foundry_project" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     resource.time_sleep.wait_project_identities
   ]
@@ -642,6 +502,8 @@ resource "azurerm_role_assignment" "search_index_data_contributor_ai_foundry_pro
 }
 
 resource "azurerm_role_assignment" "search_service_contributor_ai_foundry_project" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     resource.time_sleep.wait_project_identities
   ]
@@ -666,6 +528,8 @@ resource "time_sleep" "wait_rbac" {
 ## Create the AI Foundry project capability host
 ##
 resource "azapi_resource" "ai_foundry_project_capability_host" {
+  provider = azapi.workload_subscription
+
   depends_on = [
     azapi_resource.conn_aisearch,
     azapi_resource.conn_cosmosdb,
@@ -696,11 +560,13 @@ resource "azapi_resource" "ai_foundry_project_capability_host" {
 ## Create the necessary data plane role assignments to the CosmosDb databases created by the AI Foundry Project
 ##
 resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_db_sql_role_aifp_user_thread_message_store" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     azapi_resource.ai_foundry_project_capability_host
   ]
   name                = uuidv5("dns", "${azapi_resource.ai_foundry_project.name}${azapi_resource.ai_foundry_project.output.identity.principalId}userthreadmessage_dbsqlrole")
-  resource_group_name = azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name_resources
   account_name        = azurerm_cosmosdb_account.cosmosdb.name
   scope               = "${azurerm_cosmosdb_account.cosmosdb.id}/dbs/enterprise_memory/colls/${local.project_id_guid}-thread-message-store"
   role_definition_id  = "${azurerm_cosmosdb_account.cosmosdb.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
@@ -708,11 +574,13 @@ resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_db_sql_role_aifp_user_
 }
 
 resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_db_sql_role_aifp_system_thread_name" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     azurerm_cosmosdb_sql_role_assignment.cosmosdb_db_sql_role_aifp_user_thread_message_store
   ]
   name                = uuidv5("dns", "${azapi_resource.ai_foundry_project.name}${azapi_resource.ai_foundry_project.output.identity.principalId}systemthread_dbsqlrole")
-  resource_group_name = azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name_resources
   account_name        = azurerm_cosmosdb_account.cosmosdb.name
   scope               = "${azurerm_cosmosdb_account.cosmosdb.id}/dbs/enterprise_memory/colls/${local.project_id_guid}-system-thread-message-store"
   role_definition_id  = "${azurerm_cosmosdb_account.cosmosdb.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
@@ -720,11 +588,13 @@ resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_db_sql_role_aifp_syste
 }
 
 resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_db_sql_role_aifp_entity_store_name" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     azurerm_cosmosdb_sql_role_assignment.cosmosdb_db_sql_role_aifp_system_thread_name
   ]
   name                = uuidv5("dns", "${azapi_resource.ai_foundry_project.name}${azapi_resource.ai_foundry_project.output.identity.principalId}entitystore_dbsqlrole")
-  resource_group_name = azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name_resources
   account_name        = azurerm_cosmosdb_account.cosmosdb.name
   scope               = "${azurerm_cosmosdb_account.cosmosdb.id}/dbs/enterprise_memory/colls/${local.project_id_guid}-agent-entity-store"
   role_definition_id  = "${azurerm_cosmosdb_account.cosmosdb.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
@@ -734,6 +604,8 @@ resource "azurerm_cosmosdb_sql_role_assignment" "cosmosdb_db_sql_role_aifp_entit
 ## Create the necessary data plane role assignments to the Azure Storage Account containers created by the AI Foundry Project
 ##
 resource "azurerm_role_assignment" "storage_blob_data_owner_ai_foundry_project" {
+  provider = azurerm.workload_subscription
+
   depends_on = [
     azapi_resource.ai_foundry_project_capability_host
   ]
