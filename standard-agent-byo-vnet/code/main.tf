@@ -145,11 +145,18 @@ resource "azapi_resource" "ai_foundry" {
     }
 
     properties = {
+
+      # Support both Entra ID and API Key authentication for underlining Cognitive Services account
       disableLocalAuth = false
 
+      # Specifies that this is an AI Foundry resource
       allowProjectManagement = true
+
+      # Set custom subdomain name for DNS names created for this Foundry resource
       customSubDomainName    = "aifoundry${random_string.unique.result}"
 
+      # Network-related controls
+      # Disable public access but allow Trusted Azure Services exception
       publicNetworkAccess = "Disabled"
       networkAcls = {
         defaultAction = "Allow"
