@@ -21,3 +21,25 @@ variable "location" {
   description = "The name of the location to provision the resources to"
   type        = string
 }
+
+variable "subscription_id" {
+  description = "The Azure subscription ID to use for resource deployment."
+  type        = string
+}
+
+variable "jumpbox_subnet_address_prefix" {
+  description = "The address prefix for the subnet that will contain the jumpbox VM."
+  type        = string
+  default     = "192.168.2.0/24"
+}
+
+variable "jumpbox_admin_username" {
+  description = "The admin username for the jumpbox VM."
+  type        = string
+}
+
+variable "jumpbox_admin_password" {
+  description = "The admin password for the Windows jumpbox VM. Must meet Azure complexity requirements."
+  type        = string
+  sensitive   = true
+}

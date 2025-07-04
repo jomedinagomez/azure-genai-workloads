@@ -56,6 +56,88 @@ resource "azurerm_subnet" "subnet_pe" {
   ]
 }
 
+resource "azurerm_subnet" "subnet_jumpbox" {
+  name                 = "jumpbox-subnet"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = [var.jumpbox_subnet_address_prefix]
+}
+
+resource "azurerm_network_security_group" "jumpbox_nsg" {
+  name                = "jumpbox-nsg"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  security_rule {
+    name                       = "SSH"
+    priority                   = 1001
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "22"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+}
+
+resource "azurerm_subnet_network_security_group_association" "jumpbox_nsg_assoc" {
+  subnet_id                 = azurerm_subnet.subnet_jumpbox.id
+  network_security_group_id = azurerm_network_security_group.jumpbox_nsg.id
+}
+
+resource "azurerm_public_ip" "jumpbox_pip" {
+  name                = "jumpbox-pip"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+}
+
+resource "azurerm_network_interface" "jumpbox_nic" {
+  name                = "jumpbox-nic"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet_jumpbox.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.jumpbox_pip.id
+  }
+}
+
+resource "azurerm_windows_virtual_machine" "jumpbox" {
+  depends_on = [
+    azapi_resource.ai_foundry,
+    azurerm_private_endpoint.pe-storage,
+    azurerm_private_endpoint.pe-cosmosdb,
+    azurerm_private_endpoint.pe-aisearch,
+    azurerm_private_endpoint.pe-aifoundry
+  ]
+
+  name                = "jumpbox-vm"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = var.location
+  size                = "Standard_B2ms"
+  admin_username      = var.jumpbox_admin_username
+  admin_password      = var.jumpbox_admin_password
+  network_interface_ids = [azurerm_network_interface.jumpbox_nic.id]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+    name                 = "jumpbox-osdisk"
+  }
+
+  source_image_reference {
+    publisher = "MicrosoftWindowsServer"
+    offer     = "WindowsServer"
+    sku       = "2022-datacenter"
+    version   = "latest"
+  }
+}
+
 ########## Create resoures required to store agent data
 ##########
 
